@@ -1,4 +1,76 @@
-# mx-narrator
+# Mx Narrator Studio
+
+A self-hosted pipeline that turns a biblical reflection script into a finished,
+captioned video with YouTube-ready metadata — built for a small team producing a
+weekly multilingual (Spanish, English, Portuguese) devotional series.
+
+```
+script  ->  narrated MP3  ->  transcribed & reviewed captions  ->  captioned video  ->  LLM-generated title/description/tags
+```
+
+A human approves every consequential step along the way — captions, corrections,
+metadata. The system never touches YouTube itself: it stops at "everything is ready
+for you to upload," staged in the web UI for you to publish manually. See
+[`docs/rfc-narrator-studio.md`](docs/rfc-narrator-studio.md) for the full design and
+the reasoning behind that boundary.
+
+## Architecture
+
+- **[`mx-narrator`](#the-mx-narrator-cli)** — the underlying narration CLI (voice
+  cloning, multilingual scripture/number handling, ID3 tagging). The Studio
+  orchestrates it; it's also fully usable on its own.
+- **Temporal** — durable, observable workflow execution (`AudioGenerationWorkflow`,
+  `VideoProductionWorkflow`, `ReviseCaptionsWorkflow`), survives worker restarts and
+  GPU contention.
+- **MongoDB** — pipeline state, with change streams pushed to the web UI live via
+  Server-Sent Events (no polling).
+- **FastAPI** — the backend the web UI and Temporal workers talk to.
+- **React (Vite)** — the review/approval UI.
+- **Docker Compose** — everything self-hosted on one GPU-equipped host, no recurring
+  cloud costs.
+
+## Running the Studio
+
+```bash
+cd deploy
+docker compose up -d --build
+```
+
+Then open:
+
+| | |
+|---|---|
+| Web UI | http://localhost:3000 |
+| API | http://localhost:8000 |
+| Temporal UI | http://localhost:8080 |
+
+See [`deploy/README.md`](deploy/README.md) for prerequisites, service breakdown,
+LLM-provider configuration, and troubleshooting.
+
+## The pipeline
+
+1. **Upload a script** in the web UI — sets the ID3 tags and render parameters
+   (speed, expressiveness, CFG weight), starts `AudioGenerationWorkflow`.
+2. **Audio renders** via the `mx-narrator` CLI's real voice-cloning pipeline. You can
+   replace the resulting file directly (e.g. after adding music externally) before
+   moving on — the upload becomes what everything downstream uses.
+3. **Start video production**: upload a background image, `VideoProductionWorkflow`
+   transcribes the audio (faster-whisper) and checks it against the exact text that
+   was synthesized — catching TTS content problems (dropped or repeated speech)
+   before they reach a viewer.
+4. **Review captions** — always, not just when a mismatch is found. Caption text is
+   fully editable, synced to audio playback, with any correctness-check mismatches
+   highlighted right on the caption they affect.
+5. **Video renders** with captions burned in, then an LLM generates a YouTube
+   title/description/tags draft.
+6. **Final review**: captions, background image, and metadata are all editable
+   together in one screen — edit any of them, save once. Nothing re-renders unless
+   something actually changed.
+7. **Ready for manual upload.** The finished video and metadata sit in the UI; you
+   upload to YouTube yourself and check it off. The system never does this step for
+   you.
+
+## The `mx-narrator` CLI
 
 A CLI that turns biblical reflection scripts into narrated MP3s — in Spanish, English,
 and Portuguese — running entirely locally on an NVIDIA GPU. Built for a weekly ten-part
@@ -7,7 +79,7 @@ series on 1 John, where each unit exists as a parallel translation in all three 
 The quality bar is not "intelligible." It's that the result sounds like a person reading
 with reverence, in each language.
 
-## Requirements
+### Requirements
 
 - Linux, an NVIDIA GPU (Chatterbox needs ~4 GB VRAM; more GPUs let `batch` render a
   unit's three languages in parallel — see [Multi-GPU](#multi-gpu-batch)).
@@ -22,7 +94,7 @@ with reverence, in each language.
   sudo dnf install ffmpeg espeak-ng
   ```
 
-## Install
+### Install
 
 ```bash
 uv sync
@@ -41,7 +113,7 @@ venvs don't install `setuptools` by default the way old `pip` venvs did — so w
 loading the model fails with `TypeError: 'NoneType' object is not callable` deep inside
 `chatterbox.mtl_tts`. This project pins `setuptools<81` to route around it.
 
-## Quickstart
+### Quickstart
 
 ```bash
 # one script
@@ -72,7 +144,7 @@ headings, a blockquote, a parenthetical, and several scripture references) with 
 rendered `out/*.mp3` — a quick way to hear the pipeline work without waiting on a full
 unit.
 
-### CLI options
+#### CLI options
 
 | Option | Effect |
 |---|---|
@@ -89,7 +161,7 @@ unit.
 | `--dry-run` | Run prep only and print the prepared text — no synthesis. |
 | `--format {mp3,wav}` | Defaults to `mp3`. |
 
-## Synthesis engines
+### Synthesis engines
 
 **Chatterbox Multilingual** (default) — MIT licensed, covers all three target languages,
 clones a voice from ~5 seconds of reference audio, and exposes an "exaggeration" control
@@ -99,7 +171,7 @@ kept low by default for devotional material. ~4 GB VRAM.
 cloning. Used for `--draft` proofing passes — catching a mangled scripture reference in
 seconds instead of GPU minutes — not for final renders.
 
-### Evaluated and rejected
+#### Evaluated and rejected
 
 - **XTTS-v2** — comparable or better cloning quality, but CPML-licensed (non-commercial
   only) and Coqui shut down in January 2024, so there's no path to a commercial license.
@@ -109,7 +181,7 @@ seconds instead of GPU minutes — not for final renders.
 - **CosyVoice 2, Fish Speech** — evaluated, no compelling advantage over Chatterbox for
   this use case.
 
-## Voice identity across languages
+### Voice identity across languages
 
 The goal is that all three language versions of a unit sound like the same narrator.
 Reference samples resolve per language with a family fallback:
@@ -170,7 +242,7 @@ this less, and rebuilding an equivalent safety net from scratch (nothing native 
 into anymore) isn't worth the complexity unless it turns out to be a real problem in
 practice.
 
-## How text becomes speech
+### How text becomes speech
 
 1. **`prep`** (`src/mx_narrator/prep/`) strips markdown structurally (not with a `strip()`
    call) into blocks — headings, paragraphs, blockquotes — preserving blank lines and
@@ -194,7 +266,7 @@ practice.
    quoted scripture), normalizes loudness to -16 LUFS, encodes to MP3, and writes ID3
    tags (title, artist, album, track, and language).
 
-### Language packs
+#### Language packs
 
 Each of `prep/langs/{es,en,pt}.py` owns its own 66-book scripture abbreviation table,
 number-expansion rules, and abbreviation list — nothing outside `prep/langs/` branches on
@@ -202,7 +274,7 @@ language code. Tables are never shared across languages on purpose: Spanish `Jue
 Portuguese `Jz` are both Judges, but Portuguese `Jo` is John while Spanish uses `Jn` for
 it. A shared table would silently produce the wrong book name.
 
-## Testing
+### Testing
 
 ```bash
 uv run pytest
@@ -211,7 +283,10 @@ uv run pytest
 Covers every worked example from the scripture and number tables (all three languages),
 prep idempotency on already-prepared text, sentence splitting, structural markdown
 cleanup, and the full chunk → synth → assemble → tag pipeline (using a fake engine, so it
-runs without a GPU).
+runs without a GPU). This covers the CLI (`src/mx_narrator/`) only — the Studio layer
+(`worker/`, `api/`, `web/`) is verified against real infrastructure (Docker, Temporal,
+MongoDB) rather than a mocked unit-test suite; see the archived OpenSpec changes under
+`openspec/changes/archive/` for that verification history.
 
 GPU-dependent tests (real Chatterbox inference, including the seed-reproducibility check
 described in the spec's "voice drift" trap) are marked `slow` and skipped by default:
@@ -220,7 +295,7 @@ described in the spec's "voice drift" trap) are marked `slow` and skipped by def
 uv run pytest -m slow  # requires a CUDA GPU and downloads model weights on first run
 ```
 
-## Known limitations / things to verify for your setup
+### Known limitations / things to verify for your setup
 
 - **European vs. Brazilian Portuguese**: the Portuguese pack defaults to the `pt_BR`
   num2words locale, on the assumption that an ARC-translation audience is Brazilian. If
