@@ -363,6 +363,18 @@ the same way every time, so retrying blindly would just leave the job stuck at
 `rendering` instead of surfacing the failure; transient infra hiccups are handled by
 Temporal's own worker-restart durability, not activity-level retry.
 
+**Heartbeating.** `synthesize` can legitimately run for tens of minutes, so it (and
+every other long, single-call Activity in this system — `transcribe`, `render_video`)
+runs with a `heartbeat_timeout` of 45s, backed by a background thread that calls
+`activity.heartbeat()` every 15s (`worker/activities.py`) for the duration of the
+synchronous inference/ffmpeg call. Without this, Temporal has no way to distinguish "a
+worker died mid-call" from "a worker is still legitimately busy" until the full
+`start_to_close_timeout` (two hours, for `synthesize`) elapses — the heartbeat is what
+actually surfaces a crashed GPU worker in minutes instead of hours. `align_captions` is
+the one exception: a real episode aligns in ~13s warm, short enough that its own
+`start_to_close_timeout` is a tight enough bound on its own, so no heartbeat thread runs
+for it.
+
 ### 7.2 `VideoProductionWorkflow`
 
 ```mermaid
@@ -511,18 +523,40 @@ action — the dashboard can optionally flip `manually_uploaded` later purely fo
 user's own tracking, and a job can always be revised out of this state later, but
 nothing in the workflow depends on either happening.
 
-The correctness check compares **exact text** — the ground truth is the same
-prepared/chunked text `mx_narrator` already fed to TTS — not a fuzzy LLM judgment.
-Normalization handles known sources of false mismatches rather than flagging them as
-real ones: punctuation and case are stripped, accented vowels fold to their base form
-(Whisper is inconsistent about reproducing accents), a handful of Spanish words with two
-valid one-word/two-word spellings are merged to one canonical form on both sides, and
+Getting captions right is two independent problems, solved by two independent
+mechanisms, deliberately run in this order — content first, then timing, never the
+reverse, so alignment is never wasted on text that's about to change:
+
+**Content correctness** (`checking_correctness`, before any human review). The
+correctness check compares **exact text** — the ground truth is the same
+prepared/chunked text `mx_narrator` already fed to TTS — not a fuzzy LLM judgment: the
+ground truth is fully known and deterministic, so semantic judgment would only add
+cost/latency without adding accuracy. Normalization handles known sources of false
+mismatches rather than flagging them as real ones: punctuation and case are stripped,
+accented vowels fold to their base form (Whisper is inconsistent about reproducing
+accents — but letters like `ñ`/`ç` are deliberately left unfolded, since those are
+distinct letters, not accented vowels), a handful of Spanish words with two valid
+one-word/two-word spellings are merged to one canonical form on both sides, and
 transcribed spoken numbers are re-expanded to words (`mx_narrator`'s own prepared text
 already spells numbers out; Whisper writes them back as digits) via the same
 per-language `expand_numbers()` used during prep. See `worker/diff.py` for the full
-normalization pipeline. Whisper transcribes the **final assembled** audio — the same
-file synthesis produced — not individual pre-assembly chunks, so timestamps stay in sync
-with what the video will actually play.
+normalization pipeline. Any resulting mismatch is a flag for the human to look at, not a
+gate that blocks the pipeline — caption text is always human-reviewed next regardless of
+whether the check passed.
+
+**Timing sync** (`align_captions`, after `approve_srt`). Whisper's own segment
+timestamps can drift from the real audio, so they aren't trusted as final. Once the
+human approves the caption *text*, forced word-level alignment (`worker/align.py`) runs
+that exact approved text against the real audio waveform, producing timestamps tied to
+actual speech rather than to whatever Whisper guessed before the human's edits — running
+it after approval, rather than before, means alignment always operates on the final,
+corrected text. It's deliberately best-effort: a failed alignment degrades gracefully
+back to Whisper's original segment timing rather than blocking the workflow
+(`AlignCaptionsResult.aligned: bool` records which happened; nothing raises). Separately,
+Whisper itself always transcribes the **final assembled** audio — the same file
+synthesis produced — not individual pre-assembly chunks, so even its own timestamps
+start out in sync with what the video will actually play, before alignment refines them
+further.
 
 ## 8. Human-in-the-Loop Design
 
