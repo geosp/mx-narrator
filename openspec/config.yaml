@@ -1,0 +1,63 @@
+schema: spec-driven
+
+# Project context (optional)
+# This is shown to AI when creating artifacts.
+# Add your tech stack, conventions, style guides, domain knowledge, etc.
+context: |
+  Domain: local multilingual (es/en/pt) biblical-reflection narration, turned into
+  narrated MP3s, then captioned videos, then YouTube-ready assets — for a small team
+  producing a weekly series. Full architecture/decisions: docs/rfc-narrator-studio.md
+  (read it before creating artifacts for Mx Narrator Studio changes).
+
+  Existing, working component: `mx_narrator` (src/mx_narrator/, Python 3.11, uv-managed,
+  renamed from `narrator` — the RFC and archived OpenSpec history below still refer to it
+  by the old name) — a CLI that already does prep -> chunk -> Chatterbox V3/Kokoro
+  synthesis -> ffmpeg assembly -> ID3-tagged MP3, with real voice cloning. Treat it as a
+  stable dependency to orchestrate, not rewrite (RFC §11 "Reused From narrator" lists the
+  exact integration points, e.g. `src/mx_narrator/batch.py::render_job()`).
+
+  New system being built around it ("Mx Narrator Studio"): FastAPI backend, React 19 +
+  Vite frontend (plain JS, no TypeScript, inline CSS-in-JS — matches the sibling
+  project /home/geo/develop/projects/ebpi), Temporal workflows (self-hosted Docker,
+  Python SDK), MongoDB (Motor async driver), all self-hosted via Docker Compose on a
+  GPU-equipped host that already has `nvidia` as the Docker default runtime and a
+  private registry at docker-registry.mixwarecs-home.net:5000.
+
+  Hard constraints from the RFC, don't relitigate without flagging it explicitly:
+  - No YouTube API integration of any kind (no OAuth, no upload) — the system stops at
+    finished video + LLM-generated metadata staged for manual upload. This was
+    explicitly designed, then explicitly reversed once already (RFC §13).
+  - Every consequential pipeline step pauses for explicit human approval via Temporal
+    signals (RFC §8) — correctness-check mismatches, SRT review (always, not just on
+    mismatch), and metadata review. Never remove a human gate to simplify a workflow.
+  - Correctness check between Whisper's transcript and mx_narrator's known TTS input text
+    is exact-text comparison, not fuzzy/LLM judgment — the real risk is SRT timestamp
+    sync against the final assembled (post-concatenation, post-speed-adjustment) audio,
+    not content ambiguity (RFC §7.3).
+  - Video: single static background image (no waveform/animation), soft-muxed subtitle
+    track (not burned in) (RFC §10).
+  - Live progress in the UI via MongoDB change streams -> Server-Sent Events, not
+    polling; structured JSON logs to stdout; Temporal's native Prometheus metrics
+    enabled but no Grafana/log-aggregation stack in v1 (RFC §10.1).
+
+# Per-artifact rules (optional)
+# Add custom rules for specific artifacts.
+# Example:
+#   rules:
+#     proposal:
+#       - Keep proposals under 500 words
+#       - Always include a "Non-goals" section
+#     tasks:
+#       - Break tasks into chunks of max 2 hours
+
+# Per-operation guidance (optional)
+# Add advisory guidance for how apply and archive work should be conducted.
+# This is separate from artifact rules above.
+# Example:
+#   operations:
+#     apply:
+#       guidance:
+#         - Keep test summaries concise
+#     archive:
+#       guidance:
+#         - Summarize the archive outcome before finishing

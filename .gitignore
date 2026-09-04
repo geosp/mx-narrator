@@ -1,0 +1,26 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+out/
+scripts/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# data
+*.wav
+*.mp3
+
+# Test/tooling caches
+.pytest_cache/
+
+# Chatterbox model weight cache, if ever pointed at the repo
+.cache/
+
+# web/ (React + Vite frontend)
+node_modules/
+web/dist/

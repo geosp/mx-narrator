@@ -1,0 +1,67 @@
+[project]
+name = "mx-narrator"
+version = "0.1.0"
+description = "Local multilingual narration CLI — biblical reflection scripts to narrated MP3s (es/en/pt)"
+readme = "README.md"
+authors = [
+    { name = "Geovanny Fajardo", email = "gffajardo@gmail.com" }
+]
+requires-python = ">=3.11,<3.12"
+dependencies = [
+    "chatterbox-tts",
+    "kokoro>=0.9.4",
+    "soundfile>=0.12",
+    "torchaudio",
+    "num2words>=0.5.13",
+    "mutagen>=1.47",
+    # resemble-perth (a chatterbox-tts dependency, used for audio watermarking)
+    # still imports pkg_resources, which setuptools stopped vendoring in
+    # recent releases (VERIFIED: setuptools 84 ships no pkg_resources at
+    # all) — pin an older release that still includes it.
+    "setuptools<81",
+    "temporalio>=1.32.0",
+    "pymongo>=4.17.0",
+    "fastapi>=0.141.1",
+    "uvicorn>=0.52.4",
+    "motor>=3.7.1",
+    # Pinned exact (unlike this file's other deps) — litellm is the sole thing
+    # standing between the metadata-generation Activity and every LLM provider's real
+    # wire format (Ollama's `format` field, vLLM's `guided_json`, Anthropic's
+    # forced-tool-use trick); a version bump changing that silently is a correctness
+    # risk worth pinning against, not just floating on `>=`.
+    "litellm==1.99.0",
+    "faster-whisper>=1.2.1",
+    "srt>=3.5.3",
+    "python-multipart>=0.0.32",
+    "ctc-forced-aligner",
+]
+
+[project.scripts]
+mx-narrator = "mx_narrator.cli:main"
+
+[tool.uv.sources]
+# Chatterbox Multilingual V3 (fewer hallucinations/repetitions than the V2
+# checkpoint the PyPI release 0.1.7 hardcodes — verified: 0/30 forced-EOS
+# events in testing vs V2's near-ubiquitous rate) isn't on PyPI yet, only on
+# GitHub main. Pinned to a specific commit, not a floating branch, so this
+# doesn't silently change under us on a future `uv sync`.
+chatterbox-tts = { git = "https://github.com/resemble-ai/chatterbox.git", rev = "5de7a54aa4e5e2baadb0182dde554908b48b85c2" }
+# PyPI's published 1.0.2 replaced the low-level API this codebase is built on
+# (load_alignment_model/generate_emissions/get_alignments/...) with a new
+# higher-level interface — pinned to the last commit on the old API, which is
+# the one actually verified against real audio (see design.md).
+ctc-forced-aligner = { git = "https://github.com/MahmoudAshraf97/ctc-forced-aligner.git", rev = "11855d1de76af2b490dd2e8e2db2661805ae90a0" }
+
+[build-system]
+requires = ["uv_build>=0.9.4,<0.10.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["slow: requires a CUDA GPU and downloads model weights; excluded by default"]
+addopts = "-m 'not slow'"

@@ -1,0 +1,201 @@
+name: mx-narrator
+
+services:
+  temporal-postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: temporal
+      POSTGRES_PASSWORD: temporal
+    volumes:
+      - temporal-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U temporal"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  temporal:
+    image: temporalio/auto-setup:1.24.2
+    depends_on:
+      temporal-postgres:
+        condition: service_healthy
+    environment:
+      DB: postgres12
+      DB_PORT: "5432"
+      POSTGRES_USER: temporal
+      POSTGRES_PWD: temporal
+      POSTGRES_SEEDS: temporal-postgres
+    ports:
+      - "7233:7233"
+    healthcheck:
+      test: ["CMD", "temporal", "operator", "cluster", "health", "--address", "temporal:7233"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  temporal-ui:
+    image: temporalio/ui:2.31.2
+    depends_on:
+      temporal:
+        condition: service_healthy
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_CORS_ORIGINS: http://localhost:3000
+    ports:
+      - "8080:8080"
+
+  mongo:
+    image: mongo:7
+    command: ["mongod", "--replSet", "rs0", "--bind_ip_all"]
+    volumes:
+      - mongo-data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    ports:
+      - "27017:27017"
+
+  mongo-init:
+    image: mongo:7
+    depends_on:
+      mongo:
+        condition: service_healthy
+    restart: "no"
+    entrypoint: ["mongosh", "--host", "mongo", "--quiet", "--eval"]
+    # Idempotent: if rs0 is already initiated, initiate() errors with code 23
+    # ("already initialized") and we treat that as success, not a failure.
+    command:
+      - |
+        try {
+          rs.initiate({_id: "rs0", members: [{_id: 0, host: "mongo:27017"}]});
+          print("replica set initiated");
+        } catch (e) {
+          if (e.codeName === "AlreadyInitialized" || e.code === 23) {
+            print("replica set already initialized, nothing to do");
+          } else {
+            throw e;
+          }
+        }
+
+  api:
+    # Reuses the gpu-worker image (same monorepo, same pyproject.toml/uv.lock — see
+    # deploy/gpu-worker/Dockerfile) rather than a second multi-hundred-second build of
+    # mx_narrator's ML stack for a lightweight FastAPI+Mongo+Temporal-client service that
+    # never imports it (api/main.py only imports `worker.types`, not
+    # `worker.activities`/`worker.workflows`).
+    image: mx-narrator/gpu-worker:local
+    command: ["uv", "run", "uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    depends_on:
+      temporal:
+        condition: service_healthy
+      mongo-init:
+        condition: service_completed_successfully
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+      MONGODB_URL: mongodb://mongo:27017/?replicaSet=rs0
+      MONGODB_DATABASE: narrator_studio
+    volumes:
+      - media-data:/data/media
+    ports:
+      - "8000:8000"
+
+  web:
+    build:
+      context: ../web
+      # No VITE_API_BASE arg — the app computes it at runtime from whatever
+      # hostname/IP the browser used to load the page (see web/src/App.jsx). A
+      # build-time value here would defeat that: it'd be baked into the bundle and
+      # wrong for every device except the one that built the image.
+    image: mx-narrator/web:local
+    depends_on:
+      - api
+    ports:
+      - "3000:80"
+
+  cpu-worker:
+    # Reuses the gpu-worker image, same "one image, different command" pattern as
+    # `api` — generate_metadata is I/O-bound (an HTTP call to an LLM endpoint), no
+    # GPU needed, so this service gets no device reservation.
+    image: mx-narrator/gpu-worker:local
+    command: ["uv", "run", "python", "-m", "worker.cpu_main"]
+    depends_on:
+      temporal:
+        condition: service_healthy
+      mongo-init:
+        condition: service_completed_successfully
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+      MONGODB_URL: mongodb://mongo:27017/?replicaSet=rs0
+      MONGODB_DATABASE: narrator_studio
+      MEDIA_ROOT: /data/media
+      LLM_MODEL: ${LLM_MODEL:-ollama/llama3.1:8b}
+      # Defaults to this host's own Ollama (confirmed already listening on
+      # 0.0.0.0:11434, reachable via the host-gateway below) — override via a shell
+      # env var or .env file to point at a different LAN machine (Ollama or vLLM) or
+      # a remote API, with no compose file edit needed (design.md: LLM_API_BASE has
+      # no single sensible default in general, since it depends on which of the
+      # user's several LAN machines is in use; this is just this deployment's own
+      # current default).
+      LLM_API_BASE: ${LLM_API_BASE:-http://host.docker.internal:11434}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      # Needed now that `render_video` (episode-lifecycle-management's follow-up
+      # phase) reads the background image/audio/SRT and writes the final MP4 —
+      # this service previously only did pure-text/LLM work with no file I/O.
+      - media-data:/data/media
+
+  gpu-worker:
+    build:
+      context: ..
+      dockerfile: deploy/gpu-worker/Dockerfile
+    image: mx-narrator/gpu-worker:local
+    depends_on:
+      temporal:
+        condition: service_healthy
+      mongo-init:
+        condition: service_completed_successfully
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+      MONGODB_URL: mongodb://mongo:27017/?replicaSet=rs0
+      MONGODB_DATABASE: narrator_studio
+      MEDIA_ROOT: /data/media
+      HF_HOME: /data/hf-cache
+    volumes:
+      - media-data:/data/media
+      # Bind-mounts the host's existing HF cache (~5GB of already-downloaded
+      # Chatterbox weights) rather than a fresh named volume, so the worker doesn't
+      # re-download them — this stack runs on a single home-lab host (RFC scope:
+      # personal/internal, self-hosted, single machine), so a host-specific path here
+      # is consistent with this repo's existing deploy docs (e.g. the `spark` project
+      # path already called out in this file's README).
+      - ${HOME}/.cache/huggingface:/data/hf-cache
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: ["gpu"]
+
+# Named volumes point at the ones the stack already had under its old compose
+# project name (narrator-studio) rather than letting the mx-narrator project
+# name default-prefix fresh, empty ones — same principle as MONGODB_DATABASE
+# staying narrator_studio: don't risk/migrate real production data for a
+# purely cosmetic rename. narrator-studio_hf-cache is NOT listed here — it's
+# an orphaned volume from before hf-cache became a host bind mount, unused by
+# this compose file either way.
+volumes:
+  temporal-postgres-data:
+    external: true
+    name: narrator-studio_temporal-postgres-data
+  mongo-data:
+    external: true
+    name: narrator-studio_mongo-data
+  media-data:
+    external: true
+    name: narrator-studio_media-data
