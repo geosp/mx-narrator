@@ -27,6 +27,7 @@ from temporalio.client import Client
 
 from mx_narrator.prep.registry import available_languages
 from worker.id3 import apply_id3
+from worker.media import media_relative_url
 from worker.types import (
     AudioGenerationWorkflowInput,
     Id3Fields,
@@ -219,8 +220,7 @@ async def create_script(body: ScriptIn) -> ScriptOut:
 
 
 def _media_url(absolute_path: str) -> str:
-    # Relative to MEDIA_ROOT, matching the /media static mount.
-    return f"/media/{Path(absolute_path).relative_to(MEDIA_ROOT)}"
+    return media_relative_url(absolute_path, MEDIA_ROOT)
 
 
 def _serialize(doc: dict) -> dict:

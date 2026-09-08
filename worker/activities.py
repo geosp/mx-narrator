@@ -14,6 +14,7 @@ import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
+import torch
 from motor.motor_asyncio import AsyncIOMotorClient
 from pymongo import MongoClient
 from temporalio import activity
@@ -24,6 +25,7 @@ from worker.align import align_captions as align_captions_fn
 from worker.diff import check_correctness
 from worker.id3 import apply_id3
 from worker.llm import VideoMetadataSchema, generate_structured
+from worker.media import media_relative_url, slugify_filename
 from worker.transcription import transcribe_audio
 from worker.video import render_video as render_video_ffmpeg
 from worker.voice_storage import voice_family_path
@@ -101,7 +103,7 @@ def synthesize(input: SynthesizeInput) -> SynthesizeResult:
         script_path = job_dir / "script.txt"
         script_path.write_text(input.script_text, encoding="utf-8")
 
-        out_path = job_dir / f"{input.unit_id}.{input.lang}.mp3"
+        out_path = job_dir / f"{slugify_filename(input.unit_id)}.{input.lang}.mp3"
 
         job = RenderJob(
             unit_id=input.unit_id,
@@ -133,6 +135,16 @@ def synthesize(input: SynthesizeInput) -> SynthesizeResult:
     finally:
         stop_heartbeat.set()
         heartbeat_thread.join(timeout=1)
+        # This process handles synthesize/transcribe/align_captions across many jobs
+        # over its lifetime (one long-lived gpu-worker); PyTorch's caching allocator
+        # keeps Chatterbox's VRAM reserved for itself even after the model object is
+        # gone, so a later activity in this same process (transcribe's ctranslate2
+        # allocator, in particular) can fail with a CUDA OOM despite the GPU actually
+        # being idle. Confirmed as the real cause of a stuck video_job: ~10GB resident
+        # at 0% utilization. empty_cache() returns PyTorch's unused reserved memory to
+        # the driver so other allocators can actually use it.
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
 
 @activity.defn
@@ -146,7 +158,7 @@ def mark_render_job(render_job_id: str, status: str, audio_path: str = "", error
         # Computed once here rather than in api/main.py, so it reaches both the
         # render_jobs SSE stream and the /dashboard listing without recomputing it
         # in two places (Path(...).relative_to(...) matching the /media static mount).
-        update["audio_url"] = f"/media/{Path(audio_path).relative_to(MEDIA_ROOT)}"
+        update["audio_url"] = media_relative_url(audio_path, MEDIA_ROOT)
     if error:
         update["error"] = error
     _db()["render_jobs"].update_one({"_id": render_job_id}, {"$set": update})
@@ -249,6 +261,10 @@ def transcribe(input: TranscribeInput) -> TranscribeResult:
     finally:
         stop_heartbeat.set()
         heartbeat_thread.join(timeout=1)
+        # See the matching comment in synthesize()'s finally block — same
+        # cross-activity VRAM accumulation risk, same fix.
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
 
 @activity.defn
@@ -293,7 +309,7 @@ def mark_video_job(
         update["video_path"] = video_path
         # Same computation as mark_render_job's audio_url — stored once here so
         # neither the API layer nor the review UI need to recompute it.
-        update["video_url"] = f"/media/{Path(video_path).relative_to(MEDIA_ROOT)}"
+        update["video_url"] = media_relative_url(video_path, MEDIA_ROOT)
         # video_url's path is identical across every re-render (same
         # video_job_id, same "output.mp4"), so a browser has no natural
         # signal to refetch after a revise — confirmed the hard way: a real

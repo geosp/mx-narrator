@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from "react";
-import { API_BASE, styles, videoStatusBadge } from "./lib.js";
+import { API_BASE, styles, videoStatusBadge, encodeMediaPath } from "./lib.js";
 import { parseSrt, serializeSrt } from "./srt.js";
 
 const localStyles = {
@@ -535,8 +535,9 @@ export default function VideoReview({ videoJobId }) {
   // revise without this. Confirmed the hard way: a real revise re-rendered
   // correctly, but the page kept showing the old video.
   const videoUrl = job?.video_url
-    ? `${job.video_url}?t=${encodeURIComponent(job.video_rendered_at || "")}`
+    ? `${encodeMediaPath(job.video_url)}?t=${encodeURIComponent(job.video_rendered_at || "")}`
     : undefined;
+  const audioUrl = encodeMediaPath(job?.audio_url);
 
   return (
     <div style={styles.page}>
@@ -556,7 +557,7 @@ export default function VideoReview({ videoJobId }) {
       {job?.status === "srt_review_pending" && (
         <SrtReview
           videoJobId={videoJobId}
-          audioUrl={job?.audio_url}
+          audioUrl={audioUrl}
           mismatches={job?.correctness_check?.mismatches || []}
         />
       )}
@@ -567,7 +568,7 @@ export default function VideoReview({ videoJobId }) {
         <MetadataReview
           videoJobId={videoJobId}
           videoUrl={videoUrl}
-          audioUrl={job?.audio_url}
+          audioUrl={audioUrl}
           mismatches={job?.correctness_check?.mismatches || []}
         />
       )}
@@ -575,7 +576,7 @@ export default function VideoReview({ videoJobId }) {
         <ReadyForUpload
           videoJobId={videoJobId}
           videoUrl={videoUrl}
-          audioUrl={job?.audio_url}
+          audioUrl={audioUrl}
           mismatches={job?.correctness_check?.mismatches || []}
         />
       )}
@@ -585,7 +586,7 @@ export default function VideoReview({ videoJobId }) {
           {job?.srt_path && (
             <ReviseTabs
               videoJobId={videoJobId}
-              audioUrl={job?.audio_url}
+              audioUrl={audioUrl}
               mismatches={job?.correctness_check?.mismatches || []}
             />
           )}

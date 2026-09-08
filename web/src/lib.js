@@ -8,6 +8,18 @@ import { createElement } from "react";
 export const API_BASE =
   import.meta.env.VITE_API_BASE || `${window.location.protocol}//${window.location.hostname}:8000`;
 
+// A stored media path (audio_url/video_url) can contain characters that are
+// unsafe left raw in a URL — a literal "?" in particular gets parsed by the
+// browser as the query-string delimiter, silently truncating the path before
+// the request is even sent. Plain encodeURI() doesn't fix this — it
+// deliberately leaves "? # & = + : @ , ; $" unescaped, assuming they're
+// already meaningful URI syntax. Encoding each path segment individually
+// (and rejoining with "/") is what actually escapes those characters while
+// keeping "/" as the path separator the backend's /media mount expects.
+export function encodeMediaPath(path) {
+  return path ? path.split("/").map(encodeURIComponent).join("/") : path;
+}
+
 export const styles = {
   page: { maxWidth: 720, margin: "0 auto", padding: "32px 20px 80px" },
   h1: { fontSize: 24, marginBottom: 4 },

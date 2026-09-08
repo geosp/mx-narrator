@@ -102,7 +102,7 @@ def render_job(
         if not chunks:
             return RenderResult(job=job, ok=False, message="prepared script has no content to synthesize")
 
-        tmp_dir = job.out_path.parent / f".{job.unit_id}.{job.lang}.chunks"
+        tmp_dir = job.out_path.parent / f".{job.out_path.stem}.chunks"
         tmp_dir.mkdir(parents=True, exist_ok=True)
         try:
             segments = []

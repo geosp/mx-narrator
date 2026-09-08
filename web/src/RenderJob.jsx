@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { API_BASE, styles, renderStatusBadge, ProgressBar } from "./lib.js";
+import { API_BASE, styles, renderStatusBadge, ProgressBar, encodeMediaPath } from "./lib.js";
 
 function ReplaceAudio({ renderJobId }) {
   const [file, setFile] = useState(null);
@@ -94,7 +94,7 @@ export default function RenderJob({ renderJobId }) {
   // "audio{ext}" name) — a browser has no natural signal to refetch after a second
   // replace without this. Same fix, same reason, as video_url in VideoReview.jsx.
   const audioUrl = job?.audio_url
-    ? `${job.audio_url}?t=${encodeURIComponent(job.audio_replaced_at || "")}`
+    ? `${encodeMediaPath(job.audio_url)}?t=${encodeURIComponent(job.audio_replaced_at || "")}`
     : undefined;
 
   return (

@@ -174,31 +174,47 @@ class VideoProductionWorkflow:
         # No workflow-level execution timeout — deliberate, unlike every other
         # timeout in this codebase (all Activity-scoped). This is the first workflow
         # that legitimately sits idle for human review timescales, not a bug.
-        transcript = await workflow.execute_activity(
-            transcribe,
-            TranscribeInput(video_job_id=input.video_job_id, audio_path=input.audio_path, lang=input.lang),
-            start_to_close_timeout=TRANSCRIBE_START_TO_CLOSE_TIMEOUT,
-            heartbeat_timeout=TRANSCRIBE_HEARTBEAT_TIMEOUT,
-            retry_policy=TRANSCRIBE_RETRY_POLICY,
-        )
+        #
+        # transcribe/correctness_check are unattended system work, same as
+        # render_video/generate_metadata below — a failure here (confirmed for real:
+        # a CUDA OOM in transcribe after both retry attempts) must be recorded, not
+        # leave video_jobs.status stuck at "transcribing" forever with no error while
+        # the workflow itself has already died.
+        try:
+            transcript = await workflow.execute_activity(
+                transcribe,
+                TranscribeInput(video_job_id=input.video_job_id, audio_path=input.audio_path, lang=input.lang),
+                start_to_close_timeout=TRANSCRIBE_START_TO_CLOSE_TIMEOUT,
+                heartbeat_timeout=TRANSCRIBE_HEARTBEAT_TIMEOUT,
+                retry_policy=TRANSCRIBE_RETRY_POLICY,
+            )
 
-        # srt_path is recorded here, right after transcription — matches RFC's
-        # diagram ("write srt_path" immediately after transcribe) and is what makes
-        # GET /video_jobs/{id}/srt able to pre-fill the review textarea before
-        # approval, not just after finalize_srt writes the approved version over it.
-        await workflow.execute_activity(
-            mark_video_job,
-            args=[input.video_job_id, "checking_correctness", None, transcript.srt_path],
-            start_to_close_timeout=MARK_VIDEO_JOB_START_TO_CLOSE_TIMEOUT,
-            retry_policy=MONGO_WRITE_RETRY_POLICY,
-        )
-        check = await workflow.execute_activity(
-            correctness_check,
-            CorrectnessCheckInput(script_text=input.script_text, lang=input.lang, words=transcript.words),
-            task_queue="cpu-tasks",  # pure CPU text processing — design.md
-            start_to_close_timeout=CORRECTNESS_CHECK_START_TO_CLOSE_TIMEOUT,
-            retry_policy=CORRECTNESS_CHECK_RETRY_POLICY,
-        )
+            # srt_path is recorded here, right after transcription — matches RFC's
+            # diagram ("write srt_path" immediately after transcribe) and is what
+            # makes GET /video_jobs/{id}/srt able to pre-fill the review textarea
+            # before approval, not just after finalize_srt writes the approved
+            # version over it.
+            await workflow.execute_activity(
+                mark_video_job,
+                args=[input.video_job_id, "checking_correctness", None, transcript.srt_path],
+                start_to_close_timeout=MARK_VIDEO_JOB_START_TO_CLOSE_TIMEOUT,
+                retry_policy=MONGO_WRITE_RETRY_POLICY,
+            )
+            check = await workflow.execute_activity(
+                correctness_check,
+                CorrectnessCheckInput(script_text=input.script_text, lang=input.lang, words=transcript.words),
+                task_queue="cpu-tasks",  # pure CPU text processing — design.md
+                start_to_close_timeout=CORRECTNESS_CHECK_START_TO_CLOSE_TIMEOUT,
+                retry_policy=CORRECTNESS_CHECK_RETRY_POLICY,
+            )
+        except ActivityError as exc:
+            await workflow.execute_activity(
+                mark_video_job,
+                args=[input.video_job_id, "failed", None, "", "", str(exc.cause or exc)],
+                start_to_close_timeout=MARK_VIDEO_JOB_START_TO_CLOSE_TIMEOUT,
+                retry_policy=MONGO_WRITE_RETRY_POLICY,
+            )
+            return
 
         if check.status == "mismatch":
             await workflow.execute_activity(
