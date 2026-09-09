@@ -609,11 +609,16 @@ might not even be an MP3.
 
 ## 9. Security & Secrets
 
-- **`LLM_MODEL`, `LLM_API_BASE`**: plain config (not secrets) selecting the LLM
-  provider and target machine for metadata generation — e.g. `LLM_MODEL=ollama/
-  llama3.1:8b` with `LLM_API_BASE=http://host.docker.internal:11434` for the
-  deployment host's own Ollama instance (the current default), or `hosted_vllm/<model>`
-  with a vLLM host's `/v1` endpoint for a different LAN machine.
+- **`LLM_MODEL`, `LLM_API_BASE`, `OLLAMA_KEEP_ALIVE`**: plain config (not secrets)
+  selecting the LLM provider and target machine for metadata generation — e.g.
+  `LLM_MODEL=ollama_chat/qwen3.5:9b` (not plain `ollama/...` — litellm's `ollama/`
+  prefix routes through Ollama's legacy `/api/generate` handler, which silently drops
+  `OLLAMA_KEEP_ALIVE` in the wrong place in the request; `ollama_chat/` handles it
+  correctly) with `LLM_API_BASE=http://host.docker.internal:11434` for the deployment
+  host's own Ollama instance (the current default), or `hosted_vllm/<model>` with a
+  vLLM host's `/v1` endpoint for a different LAN machine. `OLLAMA_KEEP_ALIVE` (default
+  `30m`) keeps the model resident longer than Ollama's own 5-minute default, reducing
+  cold runner (re)starts — see §12's note on the ROCm GPU-hang mitigation.
 - **`ANTHROPIC_API_KEY`**: `.env`-provided, excluded from any image build context —
   **only required when `LLM_MODEL` is explicitly configured to select a remote
   provider** (e.g. `anthropic/claude-...`). Not required, and not read, when using the
@@ -686,6 +691,33 @@ separate Web UI (still available at `:8080` for deeper debugging) to check on th
 Kept as a record of *why* things are the way they are — not reproduced from scratch each
 time this document changes, only appended to.
 
+- **`generate_metadata` resilience against a ROCm GPU-hang** → real, recurring
+  production failures (`journalctl -u ollama`: `HW Exception ... GPU Hang` on the
+  deployment host's AMD iGPU) traced to Ollama's model runner crashing and its
+  immediate auto-relaunch often hanging again within seconds — the original
+  `RetryPolicy(maximum_attempts=2)` (Temporal defaults: ~1s apart) never gave the
+  hang real time to clear. Widened to 5 attempts spanning ~5.5 minutes
+  (`GENERATE_METADATA_RETRY_POLICY`, §7.2), and added `OLLAMA_KEEP_ALIVE` (default
+  `30m`, up from Ollama's 5-minute default) since the hang correlates with runner
+  (re)starts, not idle time — fewer cold starts, fewer chances to hit it. Also
+  switched `LLM_MODEL`'s default provider prefix from `ollama/` to `ollama_chat/`:
+  litellm's plain `ollama/` path silently drops `keep_alive` in the wrong place in
+  the outgoing request (verified via `ollama ps`); `ollama_chat/` handles it
+  correctly. The underlying hang itself is a host driver/hardware issue outside
+  this repo's control — this is mitigation (much less need for the previous manual
+  `ollama run <model>`/`ollama stop <model>` workaround), not a guaranteed fix.
+- **`LLM_MODEL` default switched to `qwen3.5:9b`** → real side-by-side comparison
+  against a real production script (both models, same system/prompt as
+  `generate_metadata` actually builds) showed `qwen3.5:9b` producing more specific,
+  accurate metadata than `llama3.1:8b` (which had a real minor defect, a duplicated
+  tag, in the same test). Required one more fix to use safely: `qwen3.5:9b` is a
+  "thinking" model — left at its default, its reasoning overhead (1500+ tokens)
+  pushed past Ollama's 4096-token default context window before reaching the real
+  answer, producing empty output once and a fully unrelated, wrong-language answer
+  once. `worker/llm.py` now always passes `think=False` for any Ollama model,
+  which fixed this (confirmed for real: same script, correct on-topic Spanish
+  output, ~250 completion tokens instead of 1500+) and is a harmless no-op for a
+  non-thinking model like `llama3.1:8b`.
 - **Subtitle burn-in vs. soft track** → started as soft-track-only (§10 originally), then
   changed to burned-in after the soft track proved invisible in every real player and on
   YouTube itself. A `mov_text` track is still muxed alongside the burned-in text.

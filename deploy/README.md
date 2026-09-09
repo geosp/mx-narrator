@@ -36,12 +36,13 @@ overridable with a shell env var or `.env` file, no compose file edit needed:
 
 | Env var | Default (this deployment) | Notes |
 |---|---|---|
-| `LLM_MODEL` | `ollama/llama3.1:8b` | LiteLLM model string — `ollama/<model>` for Ollama, `hosted_vllm/<model>` for a vLLM OpenAI-compatible endpoint, `anthropic/claude-...` for remote |
+| `LLM_MODEL` | `ollama_chat/qwen3.5:9b` | LiteLLM model string — `ollama_chat/<model>` for Ollama (not plain `ollama/<model>`: litellm's `ollama/` prefix routes through Ollama's legacy `/api/generate` handler, which silently drops `OLLAMA_KEEP_ALIVE` in the wrong place in the request — `ollama_chat/` uses `/api/chat` and handles it correctly, confirmed via `ollama ps`), `hosted_vllm/<model>` for a vLLM OpenAI-compatible endpoint, `anthropic/claude-...` for remote. `qwen3.5:9b` is a "thinking" model — `worker/llm.py` always passes `think=False` for any `ollama`/`ollama_chat` model, since leaving thinking on produced empty or wrong-topic output on real test content (its reasoning overhead pushed past Ollama's 4096-token default context window before reaching the real answer) |
 | `LLM_API_BASE` | `http://host.docker.internal:11434` | Target machine's `host:port` — Ollama defaults to port 11434, vLLM's OpenAI server to 8000. The committed default assumes Ollama on *this* Docker host (already confirmed listening on `0.0.0.0:11434`); point it at a different LAN machine's IP for a different Ollama/vLLM host |
+| `OLLAMA_KEEP_ALIVE` | `30m` | How long Ollama keeps the model resident before unloading it (Ollama's own default is 5m) — longer means fewer cold runner (re)starts, see the ROCm GPU-hang note below. No effect when `LLM_MODEL` isn't an `ollama`/`ollama_chat` model |
 | `ANTHROPIC_API_KEY` | unset | Only read when `LLM_MODEL` selects `anthropic/*` |
 
 Example: switch to a different local model without touching any file —
-`LLM_MODEL=ollama/phi4-mini:3.8b docker compose up -d --force-recreate cpu-worker`.
+`LLM_MODEL=ollama_chat/phi4-mini:3.8b docker compose up -d --force-recreate cpu-worker`.
 
 ### `gpu-worker` config (transcription)
 
@@ -54,10 +55,16 @@ Example: switch to a different local model without touching any file —
 `LLM_API_BASE` default assumes): a real, recurring issue on this host's AMD/ROCm GPU
 backend is a wedged model runner (`journalctl -u ollama`: `HW Exception ... GPU
 Hang`), surfacing as `model runner has unexpectedly stopped` from every request
-regardless of model. Fix without restarting the service: `ollama stop <model>` to
-clear the wedged runner, then retry — no sudo needed. If one model keeps hitting
-this, try a different `LLM_MODEL` (this was seen intermittently on `llama3.1:8b` but
-not `phi4-mini:3.8b` on the same host).
+regardless of model. `generate_metadata` now retries this automatically for several
+minutes (`GENERATE_METADATA_RETRY_POLICY`, `worker/workflows.py`) before giving up,
+and `OLLAMA_KEEP_ALIVE` (default `30m`, see `worker/llm.py`) keeps the model resident
+longer to reduce how often a cold runner start happens at all — so most occurrences
+should now clear on their own without intervention. If a job still ends up
+`video_jobs.status: "failed"` with this error after that automatic window, fall back
+to the manual fix: `ollama stop <model>` to clear the wedged runner, then retry the
+job from the UI — no sudo needed. If one model keeps hitting this, try a different
+`LLM_MODEL` (this was seen intermittently on `llama3.1:8b` but not `phi4-mini:3.8b`
+on the same host).
 
 ## Prerequisites
 

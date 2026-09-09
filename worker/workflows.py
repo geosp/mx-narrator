@@ -131,13 +131,23 @@ RENDER_VIDEO_START_TO_CLOSE_TIMEOUT = timedelta(minutes=30)
 RENDER_VIDEO_HEARTBEAT_TIMEOUT = timedelta(seconds=45)
 RENDER_VIDEO_RETRY_POLICY = RetryPolicy(maximum_attempts=1)  # ffmpeg failures are deterministic given the same inputs
 GENERATE_METADATA_START_TO_CLOSE_TIMEOUT = timedelta(minutes=5)
-# generate_metadata calls an external LLM endpoint — a genuinely transient
-# network hiccup is plausible and worth one retry, but a persistent
-# misconfiguration (bad model name, invalid API key) or a schema-validation
-# failure on the LLM's own output is deterministic and shouldn't retry
-# indefinitely, same reasoning as TRANSCRIBE_RETRY_POLICY's "one retry, not
-# unlimited."
-GENERATE_METADATA_RETRY_POLICY = RetryPolicy(maximum_attempts=2)
+# generate_metadata's real-world failure mode, confirmed via journalctl on the
+# deployment host: Ollama's model runner (this host's AMD iGPU, via ROCm) hits
+# an intermittent "HW Exception ... GPU Hang" seconds after a fresh runner
+# starts, dies, and the very next auto-relaunched runner often hangs again
+# within seconds too — a persistent misconfiguration (bad model name, invalid
+# API key) or a schema-validation failure on the LLM's own output is still
+# deterministic and shouldn't retry indefinitely, but the GPU-hang case is
+# exactly the opposite: it needs real wall-clock time to clear, not more
+# attempts fired seconds apart. Widened well past a "genuinely transient
+# network hiccup" one-retry policy to actually span that recovery window —
+# shared by both VideoProductionWorkflow and ReviseCaptionsWorkflow.
+GENERATE_METADATA_RETRY_POLICY = RetryPolicy(
+    initial_interval=timedelta(seconds=30),
+    backoff_coefficient=2.0,
+    maximum_interval=timedelta(minutes=2),
+    maximum_attempts=5,
+)
 SAVE_METADATA_DRAFT_START_TO_CLOSE_TIMEOUT = timedelta(seconds=30)
 APPROVE_METADATA_START_TO_CLOSE_TIMEOUT = timedelta(seconds=30)
 
