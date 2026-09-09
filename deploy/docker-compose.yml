@@ -131,7 +131,7 @@ services:
       MONGODB_URL: mongodb://mongo:27017/?replicaSet=rs0
       MONGODB_DATABASE: narrator_studio
       MEDIA_ROOT: /data/media
-      LLM_MODEL: ${LLM_MODEL:-ollama/llama3.1:8b}
+      LLM_MODEL: ${LLM_MODEL:-ollama_chat/qwen3.5:9b}
       # Defaults to this host's own Ollama (confirmed already listening on
       # 0.0.0.0:11434, reachable via the host-gateway below) — override via a shell
       # env var or .env file to point at a different LAN machine (Ollama or vLLM) or
@@ -140,6 +140,12 @@ services:
       # user's several LAN machines is in use; this is just this deployment's own
       # current default).
       LLM_API_BASE: ${LLM_API_BASE:-http://host.docker.internal:11434}
+      # How long Ollama keeps the model resident before unloading it (its own
+      # default is 5m). Longer means fewer cold runner (re)starts, which this
+      # host's intermittent ROCm GPU-hang correlates with — see
+      # worker/llm.py's OLLAMA_KEEP_ALIVE comment. No effect for a non-Ollama
+      # LLM_MODEL.
+      OLLAMA_KEEP_ALIVE: ${OLLAMA_KEEP_ALIVE:-30m}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
     extra_hosts:
       - "host.docker.internal:host-gateway"
