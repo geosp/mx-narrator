@@ -24,8 +24,8 @@ from mx_narrator.prep import prepare
 from worker.align import align_captions as align_captions_fn
 from worker.diff import check_correctness
 from worker.id3 import apply_id3
-from worker.llm import VideoMetadataSchema, generate_structured
 from worker.media import media_relative_url, slugify_filename
+from worker.metadata import generate_metadata_content
 from worker.transcription import transcribe_audio
 from worker.video import render_video as render_video_ffmpeg
 from worker.voice_storage import voice_family_path
@@ -45,7 +45,6 @@ from worker.types import (
     SynthesizeResult,
     TranscribeInput,
     TranscribeResult,
-    VideoMetadataFields,
 )
 
 MONGODB_URL = os.environ.get("MONGODB_URL", "mongodb://mongo:27017/?replicaSet=rs0")
@@ -57,7 +56,6 @@ MONGODB_URL = os.environ.get("MONGODB_URL", "mongodb://mongo:27017/?replicaSet=r
 MONGODB_DATABASE = os.environ.get("MONGODB_DATABASE", "narrator_studio")
 MEDIA_ROOT = Path(os.environ.get("MEDIA_ROOT", "/data/media"))
 HEARTBEAT_INTERVAL_SECONDS = 15
-SERIES_CONTEXT_LIMIT = 10
 
 _mongo_client: MongoClient | None = None
 _async_mongo_client: AsyncIOMotorClient | None = None
@@ -164,75 +162,14 @@ def mark_render_job(render_job_id: str, status: str, audio_path: str = "", error
     _db()["render_jobs"].update_one({"_id": render_job_id}, {"$set": update})
 
 
-async def _fetch_series_context(script_id: str) -> list[str]:
-    """Prior human-approved episode titles for the same series, most recent first,
-    capped at SERIES_CONTEXT_LIMIT — prompt context for consistency (design.md).
-    Draft/unapproved titles are excluded. Returns [] for a script with no
-    `series_name` set, rather than erroring — Phase 2's `POST /scripts` doesn't
-    currently collect `series_name` at all (a real gap between the RFC's data model
-    and what's actually implemented, out of this change's declared scope to fix), so
-    this is the common case today, not just an edge case."""
-    db = _async_db()
-    script = await db["scripts"].find_one({"_id": script_id})
-    if script is None or not script.get("series_name"):
-        return []
-
-    series_name = script["series_name"]
-    titles: list[tuple] = []
-    async for sibling in db["scripts"].find({"series_name": series_name, "_id": {"$ne": script_id}}):
-        render_job_doc = await db["render_jobs"].find_one(
-            {"script_id": sibling["_id"]}, sort=[("created_at", -1)]
-        )
-        if render_job_doc is None:
-            continue
-        video_job = await db["video_jobs"].find_one(
-            {"render_job_id": render_job_doc["_id"]}, sort=[("created_at", -1)]
-        )
-        if video_job is None:
-            continue
-        metadata = await db["video_metadata"].find_one(
-            {"video_job_id": video_job["_id"], "human_approved_at": {"$ne": None}}
-        )
-        if metadata is None:
-            continue
-        titles.append((metadata["human_approved_at"], metadata["generated_title"]))
-
-    titles.sort(key=lambda t: t[0], reverse=True)
-    return [title for _, title in titles[:SERIES_CONTEXT_LIMIT]]
-
-
 @activity.defn
 async def generate_metadata(input: GenerateMetadataInput) -> GenerateMetadataResult:
-    db = _async_db()
-    render_job_doc = await db["render_jobs"].find_one({"_id": input.render_job_id})
-    if render_job_doc is None:
-        raise ValueError(f"no render_jobs document for {input.render_job_id!r}")
-
-    script = await db["scripts"].find_one({"_id": render_job_doc["script_id"]})
-    if script is None:
-        raise ValueError(f"no scripts document for {render_job_doc['script_id']!r}")
-
-    prior_titles = await _fetch_series_context(script["_id"])
-
-    system = (
-        "You write concise, accurate YouTube metadata for episodes of a devotional "
-        "narration series. Titles are clear and specific, not clickbait. "
-        "Descriptions summarize the episode's content in 2-4 sentences. "
-        "Tags are short, relevant keywords."
-    )
-    prompt_parts = [f"Episode script ({script['lang']}):\n{script['text']}"]
-    if prior_titles:
-        prior_list = "\n".join(f"- {t}" for t in prior_titles)
-        prompt_parts.append(f"Prior episode titles in this series (chronological, most recent first):\n{prior_list}")
-    prompt_parts.append("Generate a title, description, and tags for this episode.")
-    prompt = "\n\n".join(prompt_parts)
-
-    result = await generate_structured(system=system, prompt=prompt, schema=VideoMetadataSchema)
-    assert isinstance(result, VideoMetadataSchema)
-
-    return GenerateMetadataResult(
-        metadata=VideoMetadataFields(title=result.title, description=result.description, tags=result.tags)
-    )
+    # Body lives in worker/metadata.py, not here — that module has no
+    # mx_narrator import, so api/main.py's "regenerate metadata" endpoint can
+    # call the exact same logic directly without pulling in this file's heavy
+    # ML-stack import (mx_narrator.batch, above).
+    metadata = await generate_metadata_content(_async_db(), input.render_job_id)
+    return GenerateMetadataResult(metadata=metadata)
 
 
 @activity.defn
@@ -393,8 +330,8 @@ def save_metadata_draft(input: SaveMetadataDraftInput) -> None:
 @activity.defn
 def approve_metadata(input: ApproveMetadataInput) -> None:
     """Writes the (possibly human-edited) final title/description/tags and stamps
-    `human_approved_at` — this is what `_fetch_series_context` looks for when
-    finding prior episodes' approved titles."""
+    `human_approved_at` — this is what `worker/metadata.py`'s `fetch_series_context`
+    looks for when finding prior episodes' approved titles."""
     _db()["video_metadata"].update_one(
         {"video_job_id": input.video_job_id},
         {

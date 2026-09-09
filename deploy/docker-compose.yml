@@ -85,7 +85,9 @@ services:
     # deploy/gpu-worker/Dockerfile) rather than a second multi-hundred-second build of
     # mx_narrator's ML stack for a lightweight FastAPI+Mongo+Temporal-client service that
     # never imports it (api/main.py only imports `worker.types`, not
-    # `worker.activities`/`worker.workflows`).
+    # `worker.activities`/`worker.workflows`) — it does import `worker.metadata` for the
+    # "regenerate metadata" endpoint, but that module deliberately has no mx_narrator
+    # import either, so this exception doesn't pull in the ML stack.
     image: mx-narrator/gpu-worker:local
     command: ["uv", "run", "uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000"]
     depends_on:
@@ -97,6 +99,15 @@ services:
       TEMPORAL_ADDRESS: temporal:7233
       MONGODB_URL: mongodb://mongo:27017/?replicaSet=rs0
       MONGODB_DATABASE: narrator_studio
+      # Needed for the "regenerate metadata" endpoint (worker/metadata.py ->
+      # worker/llm.py) — same values as cpu-worker's, which runs the same call
+      # during the normal pipeline.
+      LLM_MODEL: ${LLM_MODEL:-ollama_chat/qwen3.5:9b}
+      LLM_API_BASE: ${LLM_API_BASE:-http://host.docker.internal:11434}
+      OLLAMA_KEEP_ALIVE: ${OLLAMA_KEEP_ALIVE:-30m}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - media-data:/data/media
     ports:

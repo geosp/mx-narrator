@@ -35,9 +35,28 @@ OLLAMA_KEEP_ALIVE = os.environ.get("OLLAMA_KEEP_ALIVE", "30m")
 
 
 class VideoMetadataSchema(BaseModel):
-    # YouTube's own length caps, enforced here so a schema violation is caught before
-    # ever reaching a human reviewer, not just left to whatever the model produces.
-    title: str = Field(min_length=1, max_length=100)
+    # No `title` field: the episode's main title is already fixed (unit_id,
+    # which real script data confirmed already matches the episode's own
+    # stated title) — asking the model to also produce a full title let a
+    # more elaborative model invent a different one outright (confirmed for
+    # real). The model instead writes a short subtitle that worker/metadata.py
+    # appends after the fixed title ("Main Title | Subtitle").
+    #
+    # max_length deliberately generous, not a tight target: a schema-enforced
+    # max_length is applied by the provider during constrained JSON decoding,
+    # not just validated after the fact — confirmed for real that a tight
+    # max_length here truncates the model's generation mid-sentence at that
+    # exact character count, landing on a dangling word (e.g. a lone trailing
+    # preposition). worker/metadata.py's _compose_title() no longer truncates
+    # the subtitle either (measured real, unconstrained subtitle lengths of
+    # 77-101 chars for one real episode, all exceeding that episode's
+    # available title budget — truncating was the normal case, not a rare
+    # backstop, and even word-boundary-aware truncation kept landing on a
+    # grammatically incomplete ending, which read as more broken than a
+    # longer title does). A human reviews every title before use, so this
+    # field's only real job is to stop a runaway generation, not to enforce
+    # YouTube's title length — that's the prompt's job, as a soft target.
+    subtitle: str = Field(min_length=1, max_length=200)
     description: str = Field(min_length=1, max_length=5000)
     tags: list[str] = Field(min_length=1, max_length=30)
 

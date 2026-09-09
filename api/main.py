@@ -28,6 +28,7 @@ from temporalio.client import Client
 from mx_narrator.prep.registry import available_languages
 from worker.id3 import apply_id3
 from worker.media import media_relative_url
+from worker.metadata import generate_metadata_content
 from worker.types import (
     AudioGenerationWorkflowInput,
     Id3Fields,
@@ -986,6 +987,59 @@ async def approve_metadata_endpoint(video_job_id: str, body: MetadataApproveIn) 
     workflow_id = (video_job or {}).get("active_workflow_id") or f"video-prod-{video_job_id}"
     handle = state["temporal"].get_workflow_handle(workflow_id)
     await handle.signal("approve_metadata", args=[body.title, body.description, body.tags])
+    return {"ok": True}
+
+
+class RegeneratedMetadataOut(BaseModel):
+    title: str
+    description: str
+    tags: list[str]
+
+
+@app.post("/video_jobs/{video_job_id}/metadata/regenerate", response_model=RegeneratedMetadataOut)
+async def regenerate_metadata(video_job_id: str) -> RegeneratedMetadataOut:
+    """A preview only — does not touch `video_metadata`. The already-approved
+    metadata stays valid until the user explicitly saves a new version via
+    `/metadata/save`, keeping "a human approves every consequential step"
+    intact for a regenerate that nobody's reviewed yet."""
+    video_job = await _db()["video_jobs"].find_one({"_id": video_job_id})
+    if video_job is None:
+        raise HTTPException(status_code=404, detail=f"no video_jobs document for {video_job_id!r}")
+    try:
+        metadata = await generate_metadata_content(_db(), video_job["render_job_id"])
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return RegeneratedMetadataOut(title=metadata.title, description=metadata.description, tags=metadata.tags)
+
+
+@app.post("/video_jobs/{video_job_id}/metadata/save")
+async def save_metadata_endpoint(video_job_id: str, body: MetadataApproveIn) -> dict:
+    """Direct Mongo write, not a Temporal signal — unlike `/metadata/approve`,
+    this is for a video_job whose owning workflow has already completed
+    (`ready_for_manual_upload`), so there's no live execution left to signal.
+    Same fields `save_metadata_draft`+`approve_metadata` write together."""
+    video_job = await _db()["video_jobs"].find_one({"_id": video_job_id})
+    if video_job is None:
+        raise HTTPException(status_code=404, detail=f"no video_jobs document for {video_job_id!r}")
+    if video_job.get("status") != "ready_for_manual_upload":
+        raise HTTPException(
+            status_code=422,
+            detail=f"can only save metadata directly once ready for manual upload (current status: {video_job.get('status')!r})",
+        )
+    await _db()["video_metadata"].update_one(
+        {"video_job_id": video_job_id},
+        {
+            "$set": {
+                "video_job_id": video_job_id,
+                "render_job_id": video_job["render_job_id"],
+                "generated_title": body.title,
+                "generated_description": body.description,
+                "generated_tags": body.tags,
+                "human_approved_at": datetime.now(timezone.utc),
+            }
+        },
+        upsert=True,
+    )
     return {"ok": True}
 
 

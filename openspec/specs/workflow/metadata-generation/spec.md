@@ -1,23 +1,49 @@
 # workflow/metadata-generation Specification
 
 ## Purpose
-The LLM-generated YouTube metadata step: given a render job's script and its series'
-prior approved episode titles, produces schema-valid title/description/tags via a
-configurable local-or-remote LLM provider (RFC §7.2), as a single deterministic call —
-no agent framework, no tool use.
+The YouTube metadata step: given a render job's script, its own already-decided
+episode title, and its series' prior approved episode titles, produces a
+schema-valid subtitle/description/tags via a configurable local-or-remote LLM
+provider (RFC §7.2), as a single deterministic call — no agent framework, no tool
+use — then composes the final title from the fixed episode title and the LLM's
+subtitle.
 
 ## Requirements
 
-### Requirement: Metadata generation produces structured, schema-valid output
-The system SHALL produce a title, description, and tags for a render job's episode by
-calling a configured LLM provider and validating its response against a fixed schema
-before returning it.
+### Requirement: The episode's main title is fixed, not LLM-generated
+The system SHALL use the episode's own already-decided title (`unit_id`, chosen
+when the script was created) as the fixed main component of the final title, and
+SHALL NOT ask the LLM to generate or replace it.
+
+#### Scenario: Final title always starts with the episode's own title
+- **WHEN** metadata generation runs for a render job
+- **THEN** the returned title begins with that render job's episode title exactly
+  as given, unmodified
+
+### Requirement: The LLM contributes only a complementary subtitle
+The system SHALL generate, via the configured LLM provider, a short subtitle that
+adds specificity about the episode without repeating the fixed title's wording,
+and SHALL compose the final title as the fixed title followed by a separator
+followed by that subtitle.
 
 #### Scenario: Successful generation
 - **WHEN** metadata generation runs for a `render_job_id` with valid script text
-- **THEN** it returns a result containing a title, a description, and a list of tags,
-  each validated against the schema's length constraints (matching YouTube's own
-  title/description/tag limits)
+- **THEN** it returns a result containing a title composed of the episode's fixed
+  title, a separator, and an LLM-generated subtitle; a description; and a list of
+  tags, each validated against the schema's length constraints (matching
+  YouTube's own description/tag limits)
+
+#### Scenario: The composed title never exceeds YouTube's title limit
+- **WHEN** the fixed title, separator, and generated subtitle together would
+  exceed YouTube's 100-character title limit
+- **THEN** the subtitle is shortened to fit within that limit and the fixed
+  title is never truncated
+
+#### Scenario: The fixed title alone is at or beyond the limit
+- **WHEN** the episode's fixed title alone is at or exceeds YouTube's
+  100-character title limit
+- **THEN** the final title is the fixed title truncated to that limit, with no
+  subtitle appended
 
 ### Requirement: LLM provider and target machine are configurable, not hardcoded
 The system SHALL select the LLM provider and the machine serving it from
@@ -52,18 +78,38 @@ unapproved or draft titles from that context.
 - **THEN** those draft titles are excluded from the context used for a new generation
   request
 
-### Requirement: A malformed LLM response is retried, not silently accepted
-The system SHALL retry a metadata-generation request a bounded number of times when
-the LLM's response fails schema validation, and SHALL surface failure after that bound
-is reached rather than retrying indefinitely or returning invalid data.
+### Requirement: A failed generation attempt is retried with real recovery time, not silently accepted
+The system SHALL retry a metadata-generation request a bounded number of times,
+with increasing delay between attempts, when it fails — whether from a
+schema-validation failure or a transient provider error (e.g. a connection
+failure or a provider-side crash) — and SHALL surface failure after that bound
+is reached rather than retrying indefinitely or returning invalid data. The
+bound and delay SHALL be long enough to plausibly outlast a real transient
+provider outage, not just a near-instant retry.
 
-#### Scenario: Transient schema-validation failure recovers
-- **WHEN** an LLM response fails schema validation on a first attempt but a retry
-  succeeds
-- **THEN** metadata generation returns the successful retry's validated result
+#### Scenario: Transient failure recovers within the retry window
+- **WHEN** a metadata-generation attempt fails (schema validation or a
+  provider-side error) but a later attempt within the retry bound succeeds
+- **THEN** metadata generation returns the successful attempt's validated result
 
-#### Scenario: Persistent schema-validation failure surfaces as an error
-- **WHEN** an LLM response fails schema validation on every attempt up to the bounded
-  retry limit
-- **THEN** metadata generation fails with an error rather than retrying indefinitely
-  or returning unvalidated data
+#### Scenario: Persistent failure surfaces as an error
+- **WHEN** every attempt up to the bounded retry limit fails
+- **THEN** metadata generation fails with an error rather than retrying
+  indefinitely or returning invalid data, and the failure is recorded (not left
+  as a silently stuck in-progress state)
+
+### Requirement: Metadata can be regenerated independent of the originating workflow
+The system SHALL support re-running metadata generation for a video job whose
+originating workflow has already completed, without requiring the workflow to
+still be running, and SHALL NOT persist the regenerated result until a human
+explicitly saves it.
+
+#### Scenario: Regenerating after the workflow has finished
+- **WHEN** a human requests regeneration for a video job that has already
+  reached its terminal ready-for-upload state
+- **THEN** the system produces a fresh title/description/tags result without
+  requiring a live workflow execution
+
+#### Scenario: Regeneration does not overwrite approved metadata by itself
+- **WHEN** a human requests regeneration but does not explicitly save the result
+- **THEN** the video job's previously approved metadata remains unchanged

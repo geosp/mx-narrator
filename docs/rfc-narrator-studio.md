@@ -2,7 +2,7 @@
 
 **Status:** Living document — describes the system as actually built and currently
 running, not a proposal awaiting implementation. Originally written as a
-pre-implementation RFC (v1–v5, decision log preserved in §13); converted to this
+pre-implementation RFC (v1–v5, decision log preserved in §12); converted to this
 format once the system had grown well past what that log could track accurately.
 Update this document whenever a change alters the architecture, data model, workflow
 shape, or a still-open decision — not for every code change, but whenever a future
@@ -19,8 +19,10 @@ reader would otherwise be misled by it.
 (Chatterbox), correct multilingual scripture/number handling, and ID3 tagging. This
 system wraps it in a small internal platform: a script upload turns into a fully-tagged
 MP3, then — after transcription, an automated correctness check, and human caption
-review — a captioned video, then LLM-generated title/description/tags, staged in the UI
-for the user to upload to YouTube themselves. A human approves every consequential step
+review — a captioned video, then a title/description/tags draft (the title built from
+the episode's own human-authored name plus an LLM-written subtitle; description and
+tags fully LLM-generated), staged in the UI for the user to upload to YouTube
+themselves. A human approves every consequential step
 along the way. The system never touches YouTube directly; it stops at "everything is
 ready for you to publish." Runs as self-hosted Docker services orchestrated by Temporal.
 
@@ -54,9 +56,13 @@ the same hand-off point the manual process had, just automated up to that point.
   screens or hiding them behind collapsed sections.
 - The ability to revise captions, the background image, or metadata *after* a job has
   already reached final review (or failed) — without re-running transcription or the
-  correctness check, since a human edit at that point already *is* the correction.
-- LLM-generated YouTube title/description/tags, staged for manual copy-paste — **the
-  system never uploads or publishes anything itself.**
+  correctness check, since a human edit at that point already *is* the correction. Once
+  a job is fully `ready_for_manual_upload`, metadata specifically can also be
+  regenerated and re-saved in place, independent of captions/image.
+- YouTube title/description/tags staged for manual copy-paste — **the system never
+  uploads or publishes anything itself.** The title's main part is always the episode's
+  own human-authored name, not LLM-invented; only its appended subtitle, the
+  description, and the tags are LLM-generated.
 - Self-hosted on the user's own Docker-capable, GPU-equipped hardware — no new recurring
   cloud costs. Metadata generation defaults to LLM inference on the user's own home
   network (Ollama/vLLM on any of several LAN machines the user already has), so no data
@@ -176,7 +182,7 @@ multi-hundred-second ML-stack build for services that don't need it — they jus
 different command against the same image. No publish worker exists — there's nothing
 for it to do.
 
-The compose project is named `mx-narrator` (renamed from `narrator-studio`; see §13),
+The compose project is named `mx-narrator` (renamed from `narrator-studio`; see §12),
 but the named volumes and the `MONGODB_DATABASE` value were deliberately **not**
 renamed alongside it — they still point at `narrator-studio_*`/`narrator_studio` so the
 rename doesn't strand or migrate real production data. Both are config, not hardcoded,
@@ -253,7 +259,7 @@ erDiagram
     }
 ```
 
-This has drifted from the ER shape originally proposed (§13): there is no `users`
+This has drifted from the ER shape originally proposed pre-implementation: there is no `users`
 collection (no auth, §4); `scripts` stores the render parameters directly rather than
 splitting them into a separate always-1:1 entity; `video_metadata` keys off
 `render_job_id` (one series of metadata per render, reused across caption revisions of
@@ -324,7 +330,8 @@ string with no translation.
 |---|---|---|
 | `_id` | string (uuid) | |
 | `render_job_id` | string → `render_jobs` | |
-| `title`, `description` | string | LLM output, human-editable before approval |
+| `title` | string | `"{unit_id} \| {LLM subtitle}"` — the main part is the episode's own human-authored name, not LLM-generated; human-editable before approval |
+| `description` | string | LLM output, human-editable before approval |
 | `tags` | array\<string\> | |
 | `approved_at` | datetime | set once the human approves/edits and confirms |
 
@@ -409,7 +416,8 @@ sequenceDiagram
     T->>CW: Activity: generate_metadata(render_job_id) (cpu-tasks)
     CW->>M: read series' prior human-approved episode titles (context)
     CW->>LLM: structured completion call (single call, no agent/tool use)
-    LLM-->>CW: title / description / tags (schema-validated)
+    LLM-->>CW: subtitle / description / tags (schema-validated)
+    CW->>CW: compose title = "{unit_id} | {subtitle}" (unit_id is fixed, not LLM-generated)
     CW->>M: write video_metadata (draft)
     T->>M: video_jobs.status = metadata_review_pending
     T->>UI: signal-wait: approve_metadata
@@ -422,16 +430,21 @@ sequenceDiagram
 Workflow ends at metadata approval. There is no publish step, no OAuth, no upload
 Activity — the user takes the finished MP4 and the approved title/description/tags from
 the UI and uploads to YouTube themselves. `generate_metadata` is a single deterministic
-Temporal Activity, not an agent — no tool use, no multi-step reasoning, no autonomous
-retries beyond Temporal's own bounded `RetryPolicy` (`maximum_attempts=2`: one retry
-covers a transient LLM-endpoint network hiccup; a persistent misconfiguration or a
-schema-validation failure on the LLM's own output is deterministic and shouldn't retry
-indefinitely). It pre-fetches context (prior human-approved episode titles in the same
-`series_name`) before making one structured LLM call. The LLM provider and target
-machine are both config-driven (`LLM_MODEL`, `LLM_API_BASE`) — defaulting to an
-Ollama-served model on the deployment host itself, with a remote API (e.g. Anthropic,
-via `ANTHROPIC_API_KEY`) available as an explicit opt-in override. See §10 and §13 for
-the technology choice and rationale.
+Temporal Activity, not an agent — no tool use, no multi-step reasoning. Its title is not
+LLM-generated at all: the main part is always the episode's own `unit_id`, with only a
+short LLM-written subtitle appended after it (`"{unit_id} | {subtitle}"`) — see §12
+Decision Log for why. Retries beyond one attempt are bounded by Temporal's `RetryPolicy`
+(`maximum_attempts=5`, 30s initial backoff up to a 2-minute cap, ~5.5 minutes total) —
+widened well past a single quick retry once real production failures showed a
+host-specific Ollama/ROCm GPU hang needing real wall-clock time to clear, not a fast
+retry (§12 Decision Log); a persistent misconfiguration or a schema-validation failure
+on the LLM's own output is still deterministic and won't be rescued by retrying longer.
+It pre-fetches context (prior human-approved episode titles in the same `series_name`)
+before making one structured LLM call. The LLM provider and target machine are both
+config-driven (`LLM_MODEL`, `LLM_API_BASE`) — defaulting to an Ollama-served model on
+the deployment host itself, with a remote API (e.g. Anthropic, via `ANTHROPIC_API_KEY`)
+available as an explicit opt-in override. See §10 and §12 for the technology choice and
+rationale.
 
 Any Activity failure from `render_video` onward (unattended system work: ffmpeg, an LLM
 call) is caught and recorded as `video_jobs.status = "failed"` with the error message —
@@ -571,7 +584,7 @@ Every point below is a Temporal signal-wait:
 2. **Caption review** — always required, regardless of correctness-check outcome; human
    reads/edits every caption row before it becomes burned-in text. Editing here is what
    *is* the correction when the automated check flagged something.
-3. **Metadata review** — human edits/approves LLM-generated title/description/tags. This
+3. **Metadata review** — human edits/approves the draft title/description/tags. This
    is the workflow's last step — once approved, the video and metadata sit in the UI,
    finished, waiting for the user to manually upload to YouTube on their own time.
 
@@ -596,6 +609,14 @@ Once a job reaches `ready_for_manual_upload` or `failed`, the same Final review 
 stays available and can trigger `ReviseCaptionsWorkflow` (§7.3) — for a correction
 noticed after the fact, or to recover a failed render without starting over from
 transcription.
+
+At `ready_for_manual_upload` specifically, metadata can also be regenerated and
+re-saved independent of captions/image, entirely outside Temporal (the owning workflow
+has already completed, so there's nothing left to signal): a "Regenerate" call runs the
+same `generate_metadata` logic directly and returns a preview without writing anything,
+so the currently-approved metadata stays valid until a human explicitly reviews and
+saves the new draft — the same "human approves every consequential step" principle
+applied to a step that happens after the workflow itself is already done.
 
 ### 8.4 Replace audio
 
@@ -628,7 +649,7 @@ might not even be an MP3.
   public internet-facing service. Treat reachability to the Docker host as equivalent to
   full access to the system; there is no further access control layer.
 - **`MONGODB_DATABASE`**: config, not a secret — decouples the Mongo database name from
-  the Docker Compose project name, specifically so a cosmetic project rename (§13) never
+  the Docker Compose project name, specifically so a cosmetic project rename (§12) never
   implies migrating or renaming live data.
 
 ## 10. Technology Stack
@@ -718,6 +739,19 @@ time this document changes, only appended to.
   which fixed this (confirmed for real: same script, correct on-topic Spanish
   output, ~250 completion tokens instead of 1500+) and is a harmless no-op for a
   non-thinking model like `llama3.1:8b`.
+- **Title is no longer LLM-generated — only its subtitle is** → the `qwen3.5:9b`
+  side-by-side comparison surfaced a real problem the model swap made worse but didn't
+  cause: asked to freely generate a title from script content, a more elaborative model
+  invented a different title than the episode's actual one, on a real episode. Checked
+  real script data: `unit_id` already matches every real script's own stated title
+  (every script opens with series name, episode number, then the title as its own
+  line). Fix: `generate_metadata` no longer asks the LLM for a `title` at all — only a
+  `subtitle` (`worker/llm.py`'s `VideoMetadataSchema`) — which `worker/metadata.py`
+  appends to the fixed `unit_id` as `"{unit_id} | {subtitle}"`, truncating only the
+  subtitle (never `unit_id`) to stay within YouTube's 100-character title cap. Also
+  added the "Regenerate metadata" capability (§8.3) as part of the same work, since
+  fixing a bad title on an already-completed episode had no path before this besides
+  re-running the whole caption-revise workflow.
 - **Subtitle burn-in vs. soft track** → started as soft-track-only (§10 originally), then
   changed to burned-in after the soft track proved invisible in every real player and on
   YouTube itself. A `mov_text` track is still muxed alongside the burned-in text.

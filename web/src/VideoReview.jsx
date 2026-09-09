@@ -76,15 +76,6 @@ const localStyles = {
   label: { fontSize: 13, color: "#444", fontWeight: 500 },
   input: { padding: "8px 10px", border: "1px solid #d0d0cd", borderRadius: 6, fontSize: 14 },
   tagsHint: { fontSize: 12, color: "#888", marginTop: 4 },
-  readOnlyBlock: {
-    background: "#f7f7f5",
-    border: "1px solid #e2e2df",
-    borderRadius: 6,
-    padding: "10px 12px",
-    fontSize: 13,
-    whiteSpace: "pre-wrap",
-    marginBottom: 12,
-  },
   checkboxRow: { display: "flex", alignItems: "center", gap: 8, marginTop: 12, fontSize: 14 },
   busy: { color: "#666", fontSize: 14 },
 };
@@ -485,12 +476,23 @@ function MetadataReview({ videoJobId, videoUrl, audioUrl, mismatches = [] }) {
 
 function ReadyForUpload({ videoJobId, videoUrl, audioUrl, mismatches = [] }) {
   const [metadata, setMetadata] = useState(null);
+  const [title, setTitle] = useState("");
+  const [description, setDescription] = useState("");
+  const [tagsText, setTagsText] = useState("");
   const [marking, setMarking] = useState(false);
+  const [regenerating, setRegenerating] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
 
   useEffect(() => {
     fetch(`${API_BASE}/video_jobs/${videoJobId}/metadata`)
       .then((res) => res.json())
-      .then(setMetadata);
+      .then((data) => {
+        setMetadata(data);
+        setTitle(data.title || "");
+        setDescription(data.description || "");
+        setTagsText((data.tags || []).join(", "));
+      });
   }, [videoJobId]);
 
   async function handleMarkUploaded() {
@@ -503,15 +505,85 @@ function ReadyForUpload({ videoJobId, videoUrl, audioUrl, mismatches = [] }) {
     }
   }
 
+  async function handleRegenerate() {
+    setRegenerating(true);
+    setError("");
+    try {
+      const res = await fetch(`${API_BASE}/video_jobs/${videoJobId}/metadata/regenerate`, { method: "POST" });
+      const data = await res.json();
+      if (!res.ok) throw new Error(typeof data.detail === "string" ? data.detail : JSON.stringify(data.detail));
+      setTitle(data.title);
+      setDescription(data.description);
+      setTagsText(data.tags.join(", "));
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setRegenerating(false);
+    }
+  }
+
+  async function handleSave() {
+    setSaving(true);
+    setError("");
+    try {
+      const tags = tagsText.split(",").map((t) => t.trim()).filter(Boolean);
+      const res = await fetch(`${API_BASE}/video_jobs/${videoJobId}/metadata/save`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title, description, tags }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(typeof data.detail === "string" ? data.detail : JSON.stringify(data.detail));
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const busy = regenerating || saving;
+
   return (
     <div style={styles.section}>
       <div style={styles.sectionTitle}>Ready for manual upload</div>
       {videoUrl && <video style={localStyles.video} controls src={`${API_BASE}${videoUrl}`} />}
       {metadata && (
         <>
-          <div style={localStyles.readOnlyBlock}>{metadata.title}</div>
-          <div style={localStyles.readOnlyBlock}>{metadata.description}</div>
-          <div style={localStyles.readOnlyBlock}>{metadata.tags.join(", ")}</div>
+          <div style={localStyles.field}>
+            <label style={localStyles.label} htmlFor="ready-title">Title</label>
+            <input id="ready-title" style={localStyles.input} value={title} onChange={(e) => setTitle(e.target.value)} />
+          </div>
+          <div style={localStyles.field}>
+            <label style={localStyles.label} htmlFor="ready-description">Description</label>
+            <textarea
+              id="ready-description"
+              style={localStyles.textarea}
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+            />
+          </div>
+          <div style={localStyles.field}>
+            <label style={localStyles.label} htmlFor="ready-tags">Tags</label>
+            <input id="ready-tags" style={localStyles.input} value={tagsText} onChange={(e) => setTagsText(e.target.value)} />
+            <div style={localStyles.tagsHint}>Comma-separated</div>
+          </div>
+          <div style={{ display: "flex", gap: 12 }}>
+            <button
+              style={{ ...styles.button, ...(busy ? styles.buttonDisabled : {}) }}
+              onClick={handleRegenerate}
+              disabled={busy}
+            >
+              {regenerating ? "Regenerating…" : "Regenerate"}
+            </button>
+            <button
+              style={{ ...styles.button, ...(busy ? styles.buttonDisabled : {}) }}
+              onClick={handleSave}
+              disabled={busy}
+            >
+              {saving ? "Saving…" : "Save"}
+            </button>
+          </div>
+          {error && <div style={styles.error}>{error}</div>}
         </>
       )}
       <label style={localStyles.checkboxRow}>
